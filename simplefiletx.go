@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -14,6 +15,11 @@ import (
 type ReaderWithStat interface {
 	io.ReadCloser
 	Stat() (os.FileInfo, error)
+}
+
+type WithHTTPMetadata interface {
+	GetHTTPMetadataKeys() ([]string, error)
+	GetHTTPMetadata(key string) ([]string, error)
 }
 
 type Opener interface {
@@ -38,11 +44,49 @@ func NewSimpleFileTransport(baseDir string) *SimpleFileTransport {
 }
 
 func NewResponseFromReaderWithStat(req *http.Request, r ReaderWithStat) (*http.Response, error) {
-	finfo, err := r.Stat()
-	if err != nil {
-		return nil, err
+	header := http.Header{}
+	var contentLength int64 = -1
+
+	meta, ok := r.(WithHTTPMetadata)
+	if ok {
+		keys, err := meta.GetHTTPMetadataKeys()
+		if err != nil {
+			return nil, err
+		}
+
+		for _, k := range keys {
+			values, err := meta.GetHTTPMetadata(k)
+			if err != nil {
+				return nil, err
+			}
+			if values == nil {
+				return nil, fmt.Errorf("GetHTTPMetadata(%s) returned a nil slice", k)
+			} else if len(values) == 0 {
+				return nil, fmt.Errorf("GetHTTPMetadata(%s) returned an empty slice", k)
+			}
+			k = textproto.CanonicalMIMEHeaderKey(k)
+			header[k] = values
+			if k == "Content-Length" {
+				if len(values) > 1 {
+					return nil, fmt.Errorf("Content-Length cannot have multiple values")
+				}
+				posContentLength, err := strconv.ParseUint(values[0], 10, 63)
+				if err != nil {
+					return nil, fmt.Errorf("invalid value for Content-Length: %s", values[0])
+				}
+				contentLength = int64(posContentLength)
+			}
+		}
 	}
-	contentLength := finfo.Size()
+
+	if contentLength < 0 {
+		finfo, err := r.Stat()
+		if err != nil {
+			return nil, err
+		}
+		contentLength := finfo.Size()
+		header["Content-Length"] = []string{strconv.FormatInt(contentLength, 10)}
+	}
 
 	return &http.Response{
 		Status:        "200 OK",
@@ -50,7 +94,7 @@ func NewResponseFromReaderWithStat(req *http.Request, r ReaderWithStat) (*http.R
 		Proto:         "HTTP/1.0",
 		ProtoMajor:    1,
 		ProtoMinor:    1,
-		Header:        http.Header{"Content-Length": []string{strconv.FormatInt(contentLength, 10)}},
+		Header:        header,
 		Body:          r,
 		ContentLength: contentLength,
 		Close:         true,
