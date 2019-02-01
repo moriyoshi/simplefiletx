@@ -1,5 +1,9 @@
 ## simplefiletx
 
+[![godoc](https://godoc.org/github.com/moriyoshi/simplefiletx?status.svg)](https://godoc.org/github.com/moriyoshi/simplefiletx)
+
+[![travis-ci](https://travis-ci.com/moriyoshi/simplefiletx.svg?branch=master)](https://travis-ci.com/moriyoshi/simplefiletx)
+
 simplefiletx is a protocol handler implementation for Go's `net.http`.
 
 In contrast to Go's standard `FileTransport` implementation, it does:

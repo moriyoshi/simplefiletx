@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/stretchr/testify/assert"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestIt(t *testing.T) {
@@ -70,24 +72,25 @@ func (*customFileInfo) Sys() interface{} {
 	return nil
 }
 
-type customReader struct {
+type customReaderWithStat struct {
 	r      *bytes.Reader
+	err    error
 	values map[string][]string
 }
 
-func (cr *customReader) Read(b []byte) (int, error) {
+func (cr *customReaderWithStat) Read(b []byte) (int, error) {
 	return cr.r.Read(b)
 }
 
-func (cr *customReader) Close() error {
+func (cr *customReaderWithStat) Close() error {
 	return nil
 }
 
-func (cr *customReader) Stat() (os.FileInfo, error) {
-	return &customFileInfo{cr.r.Size()}, nil
+func (cr *customReaderWithStat) Stat() (os.FileInfo, error) {
+	return &customFileInfo{cr.r.Size()}, cr.err
 }
 
-func (cr *customReader) GetHTTPMetadataKeys() ([]string, error) {
+func (cr *customReaderWithStat) GetHTTPMetadataKeys() ([]string, error) {
 	retval := make([]string, 0, len(cr.values))
 	for k, _ := range cr.values {
 		retval = append(retval, k)
@@ -95,7 +98,7 @@ func (cr *customReader) GetHTTPMetadataKeys() ([]string, error) {
 	return retval, nil
 }
 
-func (cr *customReader) GetHTTPMetadata(k string) ([]string, error) {
+func (cr *customReaderWithStat) GetHTTPMetadata(k string) ([]string, error) {
 	v, ok := cr.values[k]
 	if !ok {
 		return nil, errors.New("no such key")
@@ -103,43 +106,160 @@ func (cr *customReader) GetHTTPMetadata(k string) ([]string, error) {
 	return v, nil
 }
 
-type customOpener struct {
+type customOpenerReaderWithStat struct {
+	err    error
 	values map[string][]string
 }
 
-func (co *customOpener) Open(name string) (ReaderWithStat, error) {
-	return &customReader{
+func (co *customOpenerReaderWithStat) Open(name string) (io.ReadCloser, error) {
+	return &customReaderWithStat{
+		bytes.NewReader([]byte("hello world\n")),
+		co.err,
+		co.values,
+	}, nil
+}
+
+type customReaderWithSize struct {
+	r      *bytes.Reader
+	values map[string][]string
+}
+
+func (cr *customReaderWithSize) Read(b []byte) (int, error) {
+	return cr.r.Read(b)
+}
+
+func (cr *customReaderWithSize) Close() error {
+	return nil
+}
+
+func (cr *customReaderWithSize) Size() int64 {
+	return cr.r.Size()
+}
+
+func (cr *customReaderWithSize) GetHTTPMetadataKeys() ([]string, error) {
+	retval := make([]string, 0, len(cr.values))
+	for k, _ := range cr.values {
+		retval = append(retval, k)
+	}
+	return retval, nil
+}
+
+func (cr *customReaderWithSize) GetHTTPMetadata(k string) ([]string, error) {
+	v, ok := cr.values[k]
+	if !ok {
+		return nil, errors.New("no such key")
+	}
+	return v, nil
+}
+
+type customOpenerReaderWithSize struct {
+	values map[string][]string
+}
+
+func (co *customOpenerReaderWithSize) Open(name string) (io.ReadCloser, error) {
+	return &customReaderWithSize{
 		bytes.NewReader([]byte("hello world\n")),
 		co.values,
 	}, nil
 }
 
+type customReaderWithSize2 struct {
+	r      *bytes.Reader
+	err    error
+	values map[string][]string
+}
+
+func (cr *customReaderWithSize2) Read(b []byte) (int, error) {
+	return cr.r.Read(b)
+}
+
+func (cr *customReaderWithSize2) Close() error {
+	return nil
+}
+
+func (cr *customReaderWithSize2) Size() (int64, error) {
+	return cr.r.Size(), cr.err
+}
+
+func (cr *customReaderWithSize2) GetHTTPMetadataKeys() ([]string, error) {
+	retval := make([]string, 0, len(cr.values))
+	for k, _ := range cr.values {
+		retval = append(retval, k)
+	}
+	return retval, nil
+}
+
+func (cr *customReaderWithSize2) GetHTTPMetadata(k string) ([]string, error) {
+	v, ok := cr.values[k]
+	if !ok {
+		return nil, errors.New("no such key")
+	}
+	return v, nil
+}
+
+type customOpenerReaderWithSize2 struct {
+	err    error
+	values map[string][]string
+}
+
+func (co *customOpenerReaderWithSize2) Open(name string) (io.ReadCloser, error) {
+	return &customReaderWithSize2{
+		bytes.NewReader([]byte("hello world\n")),
+		co.err,
+		co.values,
+	}, nil
+}
+
 func TestCustomOpenerBasic(t *testing.T) {
-	tx := &http.Transport{}
 	_, file, _, _ := runtime.Caller(0)
 	dir := filepath.Dir(file)
 
-	tx.RegisterProtocol(
-		"file",
-		&SimpleFileTransport{
-			dir,
-			&customOpener{
-				map[string][]string{
-					"Content-Type": []string{"text/x-test"},
-				},
+	for i, expectedErr := range []error{nil, fmt.Errorf("error")} {
+		openers := []func(map[string][]string) Opener{
+			func(values map[string][]string) Opener {
+				return &customOpenerReaderWithStat{expectedErr, values}
 			},
-		},
-	)
-	c := &http.Client{Transport: tx}
+			func(values map[string][]string) Opener {
+				return &customOpenerReaderWithSize{values}
+			},
+			func(values map[string][]string) Opener {
+				return &customOpenerReaderWithSize2{expectedErr, values}
+			},
+		}
 
-	resp, err := c.Get("file:///test.txt")
-	if assert.NoError(t, err) {
-		assert.NotNil(t, resp)
-		assert.NotNil(t, resp.Body)
-		defer resp.Body.Close()
-		body, err := ioutil.ReadAll(resp.Body)
-		if assert.NoError(t, err) {
-			assert.Equal(t, []byte("hello world\n"), body)
+		for j, opener := range openers {
+			t.Run(fmt.Sprintf("%d-%d", i, j), func(t *testing.T) {
+				tx := &http.Transport{}
+				tx.RegisterProtocol(
+					"file",
+					&SimpleFileTransport{
+						dir,
+						opener(
+							map[string][]string{
+								"Content-Type": []string{"text/x-test"},
+							},
+						),
+					},
+				)
+				c := &http.Client{Transport: tx}
+
+				resp, err := c.Get("file:///test.txt")
+				if expectedErr == nil || j == 1 {
+					if assert.NoError(t, err) {
+						assert.NotNil(t, resp)
+						assert.NotNil(t, resp.Body)
+						defer resp.Body.Close()
+						body, err := ioutil.ReadAll(resp.Body)
+						if assert.NoError(t, err) {
+							assert.Equal(t, []byte("hello world\n"), body)
+						}
+					}
+				} else {
+					if !assert.Error(t, err) {
+						t.FailNow()
+					}
+				}
+			})
 		}
 	}
 }
@@ -174,7 +294,8 @@ func TestCustomOpenerWithContentLength(t *testing.T) {
 				"file",
 				&SimpleFileTransport{
 					dir,
-					&customOpener{
+					&customOpenerReaderWithStat{
+						nil,
 						map[string][]string{
 							"Content-Type":   []string{"text/x-test"},
 							"Content-Length": pattern.input,

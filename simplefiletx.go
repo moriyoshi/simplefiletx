@@ -1,3 +1,24 @@
+// Copyright (c) 2019 Moriyoshi Koizumi
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the "Software"),
+// to deal in
+// the Software without restriction, including without limitation the rights to
+// use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+// IN THE SOFTWARE.
+
 package simplefiletx
 
 import (
@@ -12,38 +33,70 @@ import (
 	"strconv"
 )
 
+// ReaderWithStat requires the type provide Stat() function in addition to
+// io.ReadCloser.
 type ReaderWithStat interface {
 	io.ReadCloser
 	Stat() (os.FileInfo, error)
 }
 
+// ReaderWithSize requires the type provide Size() function in addition to
+// io.ReadCloser.
+type ReaderWithSize interface {
+	io.ReadCloser
+	Size() int64
+}
+
+// ReaderWithSize2 requires the type provide Size() function in addition to
+// io.ReadCloser.
+type ReaderWithSize2 interface {
+	io.ReadCloser
+	Size() (int64, error)
+}
+
+// A WithHTTPMetadata provides methods that return HTTP headers, which are
+// eventually populated in the response.
 type WithHTTPMetadata interface {
+	// GetHTTPMetadataKeys() returns a set of keys allowed to give to the first argument of GetHTTPMetadata().
+	// A key corresponds to a HTTP header.
 	GetHTTPMetadataKeys() ([]string, error)
+	// GetHTTPMetadata() returns a list of values corresponding to the header.
 	GetHTTPMetadata(key string) ([]string, error)
 }
 
+// An Opener provides a single method Open() that is supposed to open a file in the filesystem.
 type Opener interface {
-	Open(name string) (ReaderWithStat, error)
+	// Open() may return a value that also implements WithHTTPMetadata.
+	Open(name string) (io.ReadCloser, error)
 }
 
+// DefaultOpener is a very basic implementation of Opener(), whose Open() method
+// simply calls os.Open().
 type DefaultOpener struct{}
 
-func (*DefaultOpener) Open(name string) (ReaderWithStat, error) {
+func (*DefaultOpener) Open(name string) (io.ReadCloser, error) {
 	return os.Open(name)
 }
 
 var defaultOpener = &DefaultOpener{}
 
+// A SimpleFileTransport implements http.RoundTripper.
 type SimpleFileTransport struct {
+	// The base directory prepended to relative pathes.
 	BaseDir string
-	Opener  Opener
+	// Opener instance
+	Opener Opener
 }
 
+// NewSimpleFileTransport() returns a SimpleFileTransport whose opener is a DefaultOpener.
 func NewSimpleFileTransport(baseDir string) *SimpleFileTransport {
 	return &SimpleFileTransport{baseDir, defaultOpener}
 }
 
-func NewResponseFromReaderWithStat(req *http.Request, r ReaderWithStat) (*http.Response, error) {
+// NewResponseFromReaderWithStat() composes a http.Response from a http.Request
+// and a io.Reader that also implements either ReaderWithStat, ReaderWithSize or
+// ReaderWithSize2.
+func NewResponseFromReaderWithStat(req *http.Request, r io.ReadCloser) (*http.Response, error) {
 	header := http.Header{}
 	var contentLength int64 = -1
 
@@ -80,11 +133,24 @@ func NewResponseFromReaderWithStat(req *http.Request, r ReaderWithStat) (*http.R
 	}
 
 	if contentLength < 0 {
-		finfo, err := r.Stat()
-		if err != nil {
-			return nil, err
+		switch r := r.(type) {
+		case ReaderWithStat:
+			finfo, err := r.Stat()
+			if err != nil {
+				return nil, err
+			}
+			contentLength = finfo.Size()
+		case ReaderWithSize:
+			contentLength = r.Size()
+		case ReaderWithSize2:
+			var err error
+			contentLength, err = r.Size()
+			if err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("%s: content length unknown", req.URL.String())
 		}
-		contentLength := finfo.Size()
 		header["Content-Length"] = []string{strconv.FormatInt(contentLength, 10)}
 	}
 
